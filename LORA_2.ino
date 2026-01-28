@@ -79,6 +79,16 @@ HardwareSerial ArduinoSerial(1); // Serial1
 #define ARDUINO_TX 33
 #define ARDUINO_RX 25
 
+// Định nghĩa các nút nhấn
+#define BTN_MODE 4
+#define BTN_TOGGLE 5
+#define BTN_STREET_ON 18
+#define BTN_STREET_OFF 19
+
+// Biến chống dội nút nhấn
+unsigned long lastBtnPress[4] = {0, 0, 0, 0};
+const unsigned long debounceDelay = 300;
+
 void setup() {
   // Serial cho debug
   Serial.begin(9600);
@@ -517,6 +527,9 @@ void loop() {
 
   // Nhận data từ LoRa
   processLoRaData();
+  
+  // Xử lý nút nhấn
+  handleButtons();  // <--- THÊM DÒNG NÀY
 
   // Kiểm tra lệnh cài đặt thời gian qua Serial
   checkTimeSetCommand();
@@ -531,4 +544,133 @@ void loop() {
   }
 
   delay(10);
+}
+
+// Cấu hình các nút nhấn
+  pinMode(BTN_MODE, INPUT_PULLUP);
+  pinMode(BTN_TOGGLE, INPUT_PULLUP);
+  pinMode(BTN_STREET_ON, INPUT_PULLUP);
+  pinMode(BTN_STREET_OFF, INPUT_PULLUP);
+  
+  Serial.println("Buttons initialized");
+
+void handleButtons() {
+  unsigned long currentTime = millis();
+  
+  // Nút 4: Đổi mode (Manual ↔ Auto)
+  if (digitalRead(BTN_MODE) == LOW && (currentTime - lastBtnPress[0] > debounceDelay)) {
+    lastBtnPress[0] = currentTime;
+    
+    if (operationMode == "manual") {
+      operationMode = "auto";
+      Serial.println("[BTN] Mode changed to AUTO");
+      
+      // Gửi lệnh auto mode với timing hiện tại
+      DateTime now = rtc.now();
+      bool isPeak = isInPeakHours(now);
+      if (isPeak) {
+        ArduinoSerial.print("AUTO:PEAK:");
+        ArduinoSerial.print(peakRed);
+        ArduinoSerial.print(":");
+        ArduinoSerial.print(peakYellow);
+        ArduinoSerial.print(":");
+        ArduinoSerial.println(peakGreen);
+      } else {
+        ArduinoSerial.print("AUTO:NORMAL:");
+        ArduinoSerial.print(normalRed);
+        ArduinoSerial.print(":");
+        ArduinoSerial.print(normalYellow);
+        ArduinoSerial.print(":");
+        ArduinoSerial.println(normalGreen);
+      }
+      
+      // Reset biến lastSent để force gửi lại lệnh
+      lastSentMode = "";
+      lastSentRed = 0;
+      lastSentYellow = 0;
+      lastSentGreen = 0;
+    } else {
+      operationMode = "manual";
+      Serial.println("[BTN] Mode changed to MANUAL");
+      
+      // Set mặc định: J1=RED, J2=GREEN
+      junction1Color = "red";
+      junction2Color = "green";
+      
+      ArduinoSerial.println("MANUAL:J1:RED");
+      ArduinoSerial.println("MANUAL:J2:GREEN");
+    }
+    
+    updateDisplay();
+  }
+  
+  // Nút 5: Toggle đèn giao thông (chỉ khi Manual mode)
+  if (digitalRead(BTN_TOGGLE) == LOW && (currentTime - lastBtnPress[1] > debounceDelay)) {
+    lastBtnPress[1] = currentTime;
+    
+    if (operationMode == "manual") {
+      // Đảo trạng thái: RED ↔ GREEN
+      if (junction1Color == "red") {
+        junction1Color = "green";
+        junction2Color = "red";
+      } else if (junction1Color == "green") {
+        junction1Color = "red";
+        junction2Color = "green";
+      } else {
+        // Nếu đang ở vàng, chuyển về đỏ-xanh
+        junction1Color = "red";
+        junction2Color = "green";
+      }
+      
+      Serial.printf("[BTN] Toggled - J1:%s, J2:%s\n", junction1Color.c_str(), junction2Color.c_str());
+      
+      // Gửi lệnh
+      String j1Upper = junction1Color;
+      j1Upper.toUpperCase();
+      String j2Upper = junction2Color;
+      j2Upper.toUpperCase();
+      
+      ArduinoSerial.print("MANUAL:J1:");
+      ArduinoSerial.println(j1Upper);
+      ArduinoSerial.print("MANUAL:J2:");
+      ArduinoSerial.println(j2Upper);
+      
+      lastSentJ1 = junction1Color;
+      lastSentJ2 = junction2Color;
+      updateDisplay();
+    } else {
+      Serial.println("[BTN] Toggle ignored - Not in MANUAL mode");
+    }
+  }
+  
+  // Nút 18: Bật đèn đường
+  if (digitalRead(BTN_STREET_ON) == LOW && (currentTime - lastBtnPress[2] > debounceDelay)) {
+    lastBtnPress[2] = currentTime;
+    
+    // Set brightness nếu chưa có
+    if (brightnessValue == 0) {
+      brightnessValue = 70; // Độ sáng mặc định
+    }
+    
+    ArduinoSerial.print("STREET:ON:");
+    ArduinoSerial.println(brightnessValue);
+    
+    Serial.printf("[BTN] Street light ON at %d%%\n", brightnessValue);
+    
+    lastStreetState = true;
+    lastStreetBright = brightnessValue;
+    updateDisplay();
+  }
+  
+  // Nút 19: Tắt đèn đường
+  if (digitalRead(BTN_STREET_OFF) == LOW && (currentTime - lastBtnPress[3] > debounceDelay)) {
+    lastBtnPress[3] = currentTime;
+    
+    ArduinoSerial.println("STREET:OFF");
+    
+    Serial.println("[BTN] Street light OFF");
+    
+    lastStreetState = false;
+    updateDisplay();
+  }
 }

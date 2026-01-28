@@ -14,9 +14,8 @@ SoftwareSerial ESP32Serial(ARDUINO_RX, ARDUINO_TX);
 #define LIGHT_GREEN2_PIN A3
 #define LIGHT_YELLOW2_PIN A4
 #define LIGHT_RED2_PIN A5
-#define STREET_LIGHT_PIN 6 // Đèn đường (hỗ trợ PWM)
+#define STREET_LIGHT_PIN 6
 
-// Create shift register objects with 2 registers each
 ShiftRegister74HC595<2> sr(8, 9, 10);    // LED 7 đoạn 1
 ShiftRegister74HC595<2> sr2(11, 12, 13); // LED 7 đoạn 2
 
@@ -39,15 +38,14 @@ int autoRed = 40, autoYellow = 3, autoGreen = 37; // Thời gian auto mode
 bool streetLightOn = false;
 int streetBrightness = 0;
 
-// Manual mode control
 String manualJ1 = ""; // "RED", "YELLOW", "GREEN"
 String manualJ2 = "";
 
-// Biến đếm thời gian
 unsigned long lastCycleTime = 0;
-int countdown1 = 0; // Countdown cho Line 1 (LED sr)
-int countdown2 = 0; // Countdown cho Line 2 (LED sr2)
-int cyclePhase = 0; // 0: J1 ĐỎ/J2 XANH→VÀNG, 1: J1 XANH→VÀNG/J2 ĐỎ
+int countdown1 = 0; 
+int countdown2 = 0; 
+int cyclePhase = 0; 
+bool j2InYellow = false; 
 
 void processUARTCommands();
 void displayNumber(int num1, int num2);
@@ -93,7 +91,7 @@ void loop() {
   // Đọc lệnh từ ESP32
   processUARTCommands();
 
-  // Điều khiển đèn đường
+  // Điều khiển đèn đường 
   if (streetLightOn) {
     analogWrite(STREET_LIGHT_PIN, map(streetBrightness, 0, 100, 0, 255));
   } else {
@@ -201,24 +199,41 @@ void controlAutoMode() {
         // J1 ĐỎ kết thúc -> chuyển sang XANH
         cyclePhase = 1;
         countdown1 = autoGreen; // 37
+        countdown2 = autoRed;   // 40
+        j2InYellow = false; // Reset cờ VÀNG khi chuyển phase
       } else if (cyclePhase == 1) {
         // J1 XANH kết thúc -> chuyển sang VÀNG
+        cyclePhase = 2;
         countdown1 = autoYellow - 1; // 2 (hiển thị 2,1,0)
-      } else {
+      } else if (cyclePhase == 2) {
         // J1 VÀNG kết thúc -> chuyển sang ĐỎ
-        cyclePhase = 0;
-        countdown1 = autoRed; // 40
+        cyclePhase = 3; // Phase 3: J1 ĐỎ, J2 XANH
+        countdown1 = autoRed;   // 40
+        countdown2 = autoGreen; // 37
       }
     }
     
-    // Xử lý Line 2 (J2) - ngược với J1
+    // Xử lý Line 2 (J2)
     if (countdown2 < 0) {
       if (cyclePhase == 0) {
+        if (!j2InYellow) {
+          // J2 XANH hết -> chuyển sang VÀNG
+          j2InYellow = true;
+          countdown2 = autoYellow - 1; // 2
+        } else {
+          // J2 VÀNG hết -> giữ nguyên, chờ J1 hết ĐỎ
+          countdown2 = 0;
+        }
+      } else if (cyclePhase == 3) {
         // J2 XANH kết thúc -> chuyển sang VÀNG
+        cyclePhase = 4; // Phase 4: J1 ĐỎ, J2 VÀNG
         countdown2 = autoYellow - 1; // 2
-      } else if (cyclePhase == 1) {
-        // J2 VÀNG kết thúc -> chuyển sang ĐỎ (J1 đang XANH)
-        countdown2 = autoRed; // 40
+      } else if (cyclePhase == 4) {
+        // J2 VÀNG kết thúc -> quay về phase 0 (reset chu kỳ)
+        cyclePhase = 0;
+        countdown1 = autoRed;   // 40
+        countdown2 = autoGreen; // 37
+        j2InYellow = false; // Reset cờ VÀNG
       }
     }
   }
@@ -227,35 +242,43 @@ void controlAutoMode() {
   displayNumber(countdown1, countdown2);
 
   // Điều khiển đèn Line 1
-  if (cyclePhase == 0) {
-    // J1: ĐỎ
+  if (cyclePhase == 0 || cyclePhase == 3 || cyclePhase == 4) {
+    // J1: ĐỎ (phase 0, 3, 4)
     digitalWrite(LIGHT_RED1_PIN, HIGH);
     digitalWrite(LIGHT_YELLOW1_PIN, LOW);
     digitalWrite(LIGHT_GREEN1_PIN, LOW);
-  } else if (cyclePhase == 1 && countdown1 > autoYellow - 1) {
+  } else if (cyclePhase == 1) {
     // J1: XANH
     digitalWrite(LIGHT_GREEN1_PIN, HIGH);
     digitalWrite(LIGHT_YELLOW1_PIN, LOW);
     digitalWrite(LIGHT_RED1_PIN, LOW);
-  } else {
+  } else { // cyclePhase == 2
     // J1: VÀNG
     digitalWrite(LIGHT_GREEN1_PIN, LOW);
     digitalWrite(LIGHT_YELLOW1_PIN, HIGH);
     digitalWrite(LIGHT_RED1_PIN, LOW);
   }
   
-  // Điều khiển đèn Line 2 - ngược với Line 1
-  if (cyclePhase == 1) {
-    // J2: ĐỎ
+  // Điều khiển đèn Line 2
+  if (cyclePhase == 1 || cyclePhase == 2) {
+    // J2: ĐỎ (khi J1 đang XANH hoặc VÀNG)
     digitalWrite(LIGHT_RED2_PIN, HIGH);
     digitalWrite(LIGHT_YELLOW2_PIN, LOW);
     digitalWrite(LIGHT_GREEN2_PIN, LOW);
-  } else if (cyclePhase == 0 && countdown2 > autoYellow - 1) {
-    // J2: XANH
-    digitalWrite(LIGHT_GREEN2_PIN, HIGH);
-    digitalWrite(LIGHT_YELLOW2_PIN, LOW);
-    digitalWrite(LIGHT_RED2_PIN, LOW);
-  } else {
+  } else if (cyclePhase == 0 || cyclePhase == 3) {
+    // J2: XANH hoặc VÀNG (phase 0 hoặc 3)
+    if (j2InYellow) {
+      // J2: VÀNG
+      digitalWrite(LIGHT_GREEN2_PIN, LOW);
+      digitalWrite(LIGHT_YELLOW2_PIN, HIGH);
+      digitalWrite(LIGHT_RED2_PIN, LOW);
+    } else {
+      // J2: XANH
+      digitalWrite(LIGHT_GREEN2_PIN, HIGH);
+      digitalWrite(LIGHT_YELLOW2_PIN, LOW);
+      digitalWrite(LIGHT_RED2_PIN, LOW);
+    }
+  } else { // cyclePhase == 4
     // J2: VÀNG
     digitalWrite(LIGHT_GREEN2_PIN, LOW);
     digitalWrite(LIGHT_YELLOW2_PIN, HIGH);
