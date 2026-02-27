@@ -41,6 +41,11 @@ int streetBrightness = 0;
 String manualJ1 = ""; // "RED", "YELLOW", "GREEN"
 String manualJ2 = "";
 
+// Night mode
+bool nightMode = false;
+unsigned long nightModeBlinkTime = 0;
+bool nightModeBlinkState = false;
+
 unsigned long lastCycleTime = 0;
 int countdown1 = 0; 
 int countdown2 = 0; 
@@ -51,6 +56,7 @@ void processUARTCommands();
 void displayNumber(int num1, int num2);
 void controlAutoMode();
 void controlManualMode();
+void controlNightMode();
 
 
 void setup() {
@@ -99,7 +105,9 @@ void loop() {
   }
 
   // Điều khiển đèn giao thông
-  if (currentMode == "manual") {
+  if (nightMode) {
+    controlNightMode();
+  } else if (currentMode == "manual") {
     controlManualMode();
   } else {
     controlAutoMode();
@@ -162,6 +170,24 @@ void processUARTCommands() {
         int colonPos = cmd.lastIndexOf(':');
         manualJ2 = cmd.substring(colonPos + 1);
         Serial.println("  -> MANUAL J2 = " + manualJ2);
+      }
+    }
+
+    // NIGHTMODE:ON hoặc NIGHTMODE:OFF
+    else if (cmd.startsWith("NIGHTMODE:")) {
+      if (cmd.indexOf("ON") > 0) {
+        nightMode = true;
+        nightModeBlinkTime = millis();
+        nightModeBlinkState = false;
+        Serial.println("  -> NIGHT MODE ON");
+      } else if (cmd.indexOf("OFF") > 0) {
+        nightMode = false;
+        Serial.println("  -> NIGHT MODE OFF");
+        // Reset về auto mode khi thoát night mode
+        cyclePhase = 0;
+        countdown1 = autoRed;
+        countdown2 = autoGreen;
+        lastCycleTime = millis();
       }
     }
   }
@@ -318,5 +344,42 @@ void controlManualMode() {
     digitalWrite(LIGHT_GREEN2_PIN, LOW);
     digitalWrite(LIGHT_YELLOW2_PIN, LOW);
     digitalWrite(LIGHT_RED2_PIN, HIGH);
+  }
+}
+
+void controlNightMode() {
+  // Nhấp nháy đèn vàng và LED 7 đoạn với chu kỳ 500ms
+  unsigned long currentTime = millis();
+  if (currentTime - nightModeBlinkTime >= 500) {
+    nightModeBlinkTime = currentTime;
+    nightModeBlinkState = !nightModeBlinkState;
+  }
+
+  // Nhấp nháy đèn VÀNG cả 2 giao lộ
+  if (nightModeBlinkState) {
+    digitalWrite(LIGHT_YELLOW1_PIN, HIGH);
+    digitalWrite(LIGHT_YELLOW2_PIN, HIGH);
+  } else {
+    digitalWrite(LIGHT_YELLOW1_PIN, LOW);
+    digitalWrite(LIGHT_YELLOW2_PIN, LOW);
+  }
+
+  // Tắt các đèn khác
+  digitalWrite(LIGHT_GREEN1_PIN, LOW);
+  digitalWrite(LIGHT_RED1_PIN, LOW);
+  digitalWrite(LIGHT_GREEN2_PIN, LOW);
+  digitalWrite(LIGHT_RED2_PIN, LOW);
+
+  // LED 7 đoạn: chỉ nhấp nháy thanh G (thanh giữa ngang)
+  // Thanh G trong LED 7 đoạn là bit 6 (0bXGXXXXXX)
+  // Để chỉ hiển thị thanh G: 0b10111111 = 0xBF
+  if (nightModeBlinkState) {
+    uint8_t segmentG[] = {0xBF, 0xBF}; // Chỉ bật thanh G
+    sr.setAll(segmentG);
+    sr2.setAll(segmentG);
+  } else {
+    uint8_t allOff[] = {0xFF, 0xFF}; // Tắt tất cả
+    sr.setAll(allOff);
+    sr2.setAll(allOff);
   }
 }
