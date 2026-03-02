@@ -1,30 +1,19 @@
-/*
- * ESP32 LORA_2 - Slave/Display Node
- * - RTC DS1307: Hiển thị thời gian
- * - LoRa UART (RX=16, TX=17): Nhận data từ Master (primary)
- * - MQTT: Backup khi LoRa lỗi
- * - LCD 20x4: Hiển thị thời gian, mode, brightness, junction status
- */
-
 #include <ArduinoJson.h>
 #include <LiquidCrystal_I2C.h>
 #include <PubSubClient.h>
 #include <RTClib.h>
 #include <WiFi.h>
 #include <Wire.h>
+#include <time.h>
 
-// Khởi tạo RTC
 RTC_DS1307 rtc;
 
-// Khởi tạo LCD I2C 20x4
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-// Khởi tạo LoRa UART
 HardwareSerial LoRaSerial(2);
 #define LORA_RX 16
 #define LORA_TX 17
 
-// WiFi credentials
 const char *ssid = "Fuvitech";
 const char *password = "fuvitech.vn";
 
@@ -138,6 +127,9 @@ void setup() {
   lcd.print("WiFi: OK            ");
   delay(1000);
 
+  // Đồng bộ thời gian từ NTP
+  syncTimeFromNTP();
+
   // Kết nối MQTT
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(mqttCallback);
@@ -145,6 +137,40 @@ void setup() {
 
   lcd.clear();
   Serial.println("System Ready!");
+}
+
+void syncTimeFromNTP() {
+  lcd.setCursor(0, 3);
+  lcd.print("Syncing NTP...      ");
+
+  configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov");
+
+  struct tm timeinfo;
+  int retry = 0;
+  while (!getLocalTime(&timeinfo) && retry < 10) {
+    delay(500);
+    Serial.print(".");
+    retry++;
+  }
+
+  if (retry < 10) {
+    rtc.adjust(DateTime(
+      timeinfo.tm_year + 1900,
+      timeinfo.tm_mon + 1,
+      timeinfo.tm_mday,
+      timeinfo.tm_hour,
+      timeinfo.tm_min,
+      timeinfo.tm_sec
+    ));
+    Serial.println("\nRTC synced from NTP!");
+    lcd.setCursor(0, 3);
+    lcd.print("NTP: OK             ");
+  } else {
+    Serial.println("\nNTP sync failed! Using RTC.");
+    lcd.setCursor(0, 3);
+    lcd.print("NTP: FAILED         ");
+  }
+  delay(1000);
 }
 
 void reconnectMQTT() {
