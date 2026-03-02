@@ -58,6 +58,7 @@ int lastSentRed = 0, lastSentYellow = 0, lastSentGreen = 0;
 String lastSentJ1 = "", lastSentJ2 = "";
 bool lastStreetState = false;
 int lastStreetBright = 0;
+bool manualStreetOn = false;  // Flag bật/tắt thủ công bằng nút nhấn
 
 // Biến đánh dấu nguồn dữ liệu
 unsigned long lastLoRaReceive = 0;
@@ -82,6 +83,13 @@ void setup() {
   // Serial cho debug
   Serial.begin(9600);
   delay(1000);
+  // Cấu hình các nút nhấn
+  pinMode(BTN_MODE, INPUT_PULLUP);
+  pinMode(BTN_TOGGLE, INPUT_PULLUP);
+  pinMode(BTN_STREET_ON, INPUT_PULLUP);
+  pinMode(BTN_STREET_OFF, INPUT_PULLUP);
+  
+  Serial.println("Buttons initialized");
   Serial.println("\n=== ESP32 LORA_2 - Display Node ===");
 
   // UART với Arduino (TX=33, RX=25, baud 9600)
@@ -446,9 +454,10 @@ void sendArduinoCommands(DateTime now) {
       operationMode.c_str(), now.hour(), now.minute());
 
   // 1. Điều khiển đèn đường
-  bool shouldBeOn = isInSchedule(now);
-  Serial.printf("[DEBUG] Street light - ShouldBeOn:%d, Brightness:%d%%\n",
-                shouldBeOn, brightnessValue);
+  // Ưu tiên nút nhấn thủ công, nếu không thì theo lịch tự động
+  bool shouldBeOn = manualStreetOn || isInSchedule(now);
+  Serial.printf("[DEBUG] Street light - ShouldBeOn:%d, Manual:%d, Brightness:%d%%\n",
+                shouldBeOn, manualStreetOn, brightnessValue);
   if (shouldBeOn != lastStreetState || brightnessValue != lastStreetBright) {
     if (shouldBeOn) {
       ArduinoSerial.print("STREET:ON:");
@@ -572,14 +581,6 @@ void loop() {
   delay(10);
 }
 
-// Cấu hình các nút nhấn
-  pinMode(BTN_MODE, INPUT_PULLUP);
-  pinMode(BTN_TOGGLE, INPUT_PULLUP);
-  pinMode(BTN_STREET_ON, INPUT_PULLUP);
-  pinMode(BTN_STREET_OFF, INPUT_PULLUP);
-  
-  Serial.println("Buttons initialized");
-
 void handleButtons() {
   unsigned long currentTime = millis();
   
@@ -669,7 +670,7 @@ void handleButtons() {
     }
   }
   
-  // Nút 18: Bật đèn đường
+  // Nút 18: Bật đèn đường (thủ công)
   if (digitalRead(BTN_STREET_ON) == LOW && (currentTime - lastBtnPress[2] > debounceDelay)) {
     lastBtnPress[2] = currentTime;
     
@@ -678,23 +679,25 @@ void handleButtons() {
       brightnessValue = 70; // Độ sáng mặc định
     }
     
+    manualStreetOn = true;  // Đánh dấu bật thủ công
     ArduinoSerial.print("STREET:ON:");
     ArduinoSerial.println(brightnessValue);
     
-    Serial.printf("[BTN] Street light ON at %d%%\n", brightnessValue);
+    Serial.printf("[BTN] Street light ON (manual) at %d%%\n", brightnessValue);
     
     lastStreetState = true;
     lastStreetBright = brightnessValue;
     updateDisplay();
   }
   
-  // Nút 19: Tắt đèn đường
+  // Nút 19: Tắt đèn đường (thủ công)
   if (digitalRead(BTN_STREET_OFF) == LOW && (currentTime - lastBtnPress[3] > debounceDelay)) {
     lastBtnPress[3] = currentTime;
     
+    manualStreetOn = false;  // Tắt override thủ công
     ArduinoSerial.println("STREET:OFF");
     
-    Serial.println("[BTN] Street light OFF");
+    Serial.println("[BTN] Street light OFF (manual)");
     
     lastStreetState = false;
     updateDisplay();
