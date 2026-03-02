@@ -70,14 +70,33 @@ HardwareSerial ArduinoSerial(1); // Serial1
 #define ARDUINO_RX 25
 
 // Định nghĩa các nút nhấn
-#define BTN_MODE 4
-#define BTN_TOGGLE 5
-#define BTN_STREET_ON 18
-#define BTN_STREET_OFF 19
+#define BTN_MODE     4   // Chuyển mode Manual <-> Auto
+#define BTN_MENU     5   // Cycle qua menu settings
+#define BTN_UP      18   // Tăng giá trị
+#define BTN_DOWN    19   // Giảm giá trị
 
 // Biến chống dội nút nhấn
 unsigned long lastBtnPress[4] = {0, 0, 0, 0};
 const unsigned long debounceDelay = 300;
+
+// Biến menu
+int  currentMenu    = 0;     // Menu đang chọn
+bool inMenu         = false; // Đang ở trong menu
+unsigned long menuLastAction = 0;
+const unsigned long menuTimeoutMs = 5000; // 5s không nhấn -> thoát menu
+
+// Giờ bật/tắt đèn đường (lưu dạng phút từ 00:00)
+int streetOnMinutes  = 18 * 60; // 18:00
+int streetOffMinutes =  6 * 60; // 06:00
+
+// Timing đèn giao thông chỉnh bằng nút
+int btnGreen  = 37;
+int btnRed    = 40;
+int btnYellow =  3;
+
+// Số menu theo mode
+#define MENU_MANUAL_COUNT 3
+#define MENU_AUTO_COUNT   7
 
 void setup() {
   // Serial cho debug
@@ -85,9 +104,9 @@ void setup() {
   delay(1000);
   // Cấu hình các nút nhấn
   pinMode(BTN_MODE, INPUT_PULLUP);
-  pinMode(BTN_TOGGLE, INPUT_PULLUP);
-  pinMode(BTN_STREET_ON, INPUT_PULLUP);
-  pinMode(BTN_STREET_OFF, INPUT_PULLUP);
+  pinMode(BTN_MENU, INPUT_PULLUP);
+  pinMode(BTN_UP,   INPUT_PULLUP);
+  pinMode(BTN_DOWN, INPUT_PULLUP);
   
   Serial.println("Buttons initialized");
   Serial.println("\n=== ESP32 LORA_2 - Display Node ===");
@@ -256,8 +275,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
       normalYellow = doc["yellow"];
     if (doc.containsKey("green"))
       normalGreen = doc["green"];
-    Serial.printf(">>> Normal: R=%d Y=%d G=%d\n", normalRed, normalYellow,
-                  normalGreen);
+    // Đồng bộ vào btn* để nút nhấ n tiếp theo bắt đầu từ giá trị web gửi
+    btnRed    = normalRed;
+    btnYellow = normalYellow;
+    btnGreen  = normalGreen;
+    Serial.printf(">>> Normal: R=%d Y=%d G=%d (synced to btn)\n", normalRed, normalYellow, normalGreen);
   } else if (topicStr == mqtt_topic_peak && !error) {
     if (doc.containsKey("red"))
       peakRed = doc["red"];
@@ -346,6 +368,12 @@ bool isInSchedule(DateTime now) {
   }
 }
 
+// Helper: in 2 chữ số lên LCD
+void lcdPrint2d(int v) {
+  if (v < 10) lcd.print("0");
+  lcd.print(v);
+}
+
 void updateDisplay() {
   DateTime now = rtc.now();
   lcd.clear();
@@ -353,61 +381,110 @@ void updateDisplay() {
   // Dòng 1: Thời gian
   lcd.setCursor(0, 0);
   lcd.print("Time: ");
-  if (now.hour() < 10)
-    lcd.print("0");
-  lcd.print(now.hour());
-  lcd.print(":");
-  if (now.minute() < 10)
-    lcd.print("0");
-  lcd.print(now.minute());
-  lcd.print(":");
-  if (now.second() < 10)
-    lcd.print("0");
-  lcd.print(now.second());
+  lcdPrint2d(now.hour()); lcd.print(":");
+  lcdPrint2d(now.minute()); lcd.print(":");
+  lcdPrint2d(now.second());
   lcd.print(" ");
-  if (now.day() < 10)
-    lcd.print("0");
-  lcd.print(now.day());
-  lcd.print("/");
-  if (now.month() < 10)
-    lcd.print("0");
-  lcd.print(now.month());
+  lcdPrint2d(now.day()); lcd.print("/");
+  lcdPrint2d(now.month());
 
   // Dòng 2: Mode
   lcd.setCursor(0, 1);
   lcd.print("Mode: ");
   lcd.print(operationMode);
-  lcd.print("              ");
+  lcd.print("            ");
 
-  // Dòng 3 & 4: Tùy mode
-  if (operationMode == "manual") {
-    // Hiển thị trạng thái 2 đèn giao lộ
+  if (inMenu) {
+    // ===== ĐANG TRONG MENU =====
     lcd.setCursor(0, 2);
-    lcd.print("J1: ");
-    lcd.print(junction1Color);
-    lcd.print("          ");
 
-    lcd.setCursor(0, 3);
-    lcd.print("J2: ");
-    lcd.print(junction2Color);
-    lcd.print("          ");
-  } else {
-    // Hiển thị độ sáng đèn đường (nếu trong khung giờ)
-    lcd.setCursor(0, 2);
-    if (isInSchedule(now)) {
-      lcd.print("Light ON: ");
-      lcd.print(brightnessValue);
-      lcd.print("%     ");
-    } else {
-      lcd.print("Light: OFF         ");
+    if (operationMode == "manual") {
+      switch (currentMenu) {
+        case 0: // Toggle J1/J2
+          lcd.print("[SET] J1:");
+          lcd.print(junction1Color);
+          lcd.print(" J2:");
+          lcd.print(junction2Color);
+          lcd.print("  ");
+          break;
+        case 1: // Street ON/OFF
+          lcd.print("[SET] Street: ");
+          lcd.print(manualStreetOn ? "ON " : "OFF");
+          lcd.print("      ");
+          break;
+        case 2: // Brightness
+          lcd.print("[SET] Bright:");
+          lcd.print(brightnessValue);
+          lcd.print("%    ");
+          break;
+      }
+    } else { // auto
+      switch (currentMenu) {
+        case 0: // Street ON/OFF
+          lcd.print("[SET] Street: ");
+          lcd.print(manualStreetOn ? "ON " : "OFF");
+          lcd.print("      ");
+          break;
+        case 1: // Brightness
+          lcd.print("[SET] Bright:");
+          lcd.print(brightnessValue);
+          lcd.print("%    ");
+          break;
+        case 2: { // ON time
+          int h = streetOnMinutes / 60, m = streetOnMinutes % 60;
+          lcd.print("[SET] ON:");
+          lcdPrint2d(h); lcd.print(":"); lcdPrint2d(m);
+          lcd.print("          ");
+          break;
+        }
+        case 3: { // OFF time
+          int h = streetOffMinutes / 60, m = streetOffMinutes % 60;
+          lcd.print("[SET] OFF:");
+          lcdPrint2d(h); lcd.print(":"); lcdPrint2d(m);
+          lcd.print("         ");
+          break;
+        }
+        case 4: // Green
+          lcd.print("[SET] Green:");
+          lcd.print(btnGreen);
+          lcd.print("s     ");
+          break;
+        case 5: // Red
+          lcd.print("[SET] Red:  ");
+          lcd.print(btnRed);
+          lcd.print("s     ");
+          break;
+        case 6: // Yellow
+          lcd.print("[SET] Yellow:");
+          lcd.print(btnYellow);
+          lcd.print("s   ");
+          break;
+      }
     }
 
+    // Dòng 4: hướng dẫn
     lcd.setCursor(0, 3);
-    lcd.print("Sched: ");
-    lcd.print(timeOn);
-    lcd.print("-");
-    lcd.print(timeOff);
-    lcd.print("  ");
+    lcd.print("UP+/DOWN-|MENU>>next");
+
+  } else {
+    // ===== MÀN HÌNH CHÍNH =====
+    if (operationMode == "manual") {
+      lcd.setCursor(0, 2);
+      lcd.print("J1:"); lcd.print(junction1Color); lcd.print("          ");
+      lcd.setCursor(0, 3);
+      lcd.print("J2:"); lcd.print(junction2Color); lcd.print("          ");
+    } else {
+      lcd.setCursor(0, 2);
+      if (manualStreetOn || isInSchedule(now)) {
+        lcd.print("Light ON: "); lcd.print(brightnessValue); lcd.print("%     ");
+      } else {
+        lcd.print("Light: OFF         ");
+      }
+      lcd.setCursor(0, 3);
+      lcd.print("Sched: ");
+      lcd.print(timeOn); lcd.print("-"); lcd.print(timeOff);
+      lcd.print("  ");
+    }
   }
 }
 
@@ -515,21 +592,22 @@ void sendArduinoCommands(DateTime now) {
         lastSentGreen = peakGreen;
       }
     } else {
-      if (lastSentMode != "normal" || normalRed != lastSentRed ||
-          normalYellow != lastSentYellow || normalGreen != lastSentGreen) {
+      // Normal mode: dùng btnRed/btnGreen/btnYellow
+      // (ai set sau thì thắng: web gửi thì sync vào btn*, nút nhấn thì chỉnh btn* trực tiếp)
+      if (lastSentMode != "normal" || btnRed != lastSentRed ||
+          btnYellow != lastSentYellow || btnGreen != lastSentGreen) {
         ArduinoSerial.print("AUTO:NORMAL:");
-        ArduinoSerial.print(normalRed);
+        ArduinoSerial.print(btnRed);
         ArduinoSerial.print(":");
-        ArduinoSerial.print(normalYellow);
+        ArduinoSerial.print(btnYellow);
         ArduinoSerial.print(":");
-        ArduinoSerial.println(normalGreen);
-        Serial.printf("[Arduino] AUTO:NORMAL:%d:%d:%d\n", normalRed,
-                      normalYellow, normalGreen);
+        ArduinoSerial.println(btnGreen);
+        Serial.printf("[Arduino] AUTO:NORMAL:%d:%d:%d\n", btnRed, btnYellow, btnGreen);
 
-        lastSentMode = "normal";
-        lastSentRed = normalRed;
-        lastSentYellow = normalYellow;
-        lastSentGreen = normalGreen;
+        lastSentMode   = "normal";
+        lastSentRed    = btnRed;
+        lastSentYellow = btnYellow;
+        lastSentGreen  = btnGreen;
       }
     }
   }
@@ -581,125 +659,216 @@ void loop() {
   delay(10);
 }
 
+// Helper: ghi lại timeOn/timeOff từ phút
+void applyStreetSchedule() {
+  char buf[6];
+  sprintf(buf, "%02d:%02d", streetOnMinutes / 60, streetOnMinutes % 60);
+  timeOn = String(buf);
+  sprintf(buf, "%02d:%02d", streetOffMinutes / 60, streetOffMinutes % 60);
+  timeOff = String(buf);
+}
+
+// Helper: gửi timing đèn giao thông xuống Arduino
+void sendAutoTiming() {
+  ArduinoSerial.print("AUTO:NORMAL:");
+  ArduinoSerial.print(btnRed);
+  ArduinoSerial.print(":");
+  ArduinoSerial.print(btnYellow);
+  ArduinoSerial.print(":");
+  ArduinoSerial.println(btnGreen);
+  Serial.printf("[BTN] AUTO timing R=%d Y=%d G=%d\n", btnRed, btnYellow, btnGreen);
+  // reset lastSent để force gửi lại
+  lastSentMode = "";
+}
+
 void handleButtons() {
   unsigned long currentTime = millis();
-  
-  // Nút 4: Đổi mode (Manual ↔ Auto)
+
+  // Tự thoát menu sau menuTimeoutMs giây không nhấn
+  if (inMenu && (currentTime - menuLastAction > menuTimeoutMs)) {
+    inMenu = false;
+    updateDisplay();
+  }
+
+  // ── Nút BTN_MODE (GPIO 4): Chuyển mode Manual ↔ Auto ──
   if (digitalRead(BTN_MODE) == LOW && (currentTime - lastBtnPress[0] > debounceDelay)) {
     lastBtnPress[0] = currentTime;
     
     if (operationMode == "manual") {
-      operationMode = "auto";
-      Serial.println("[BTN] Mode changed to AUTO");
-      
-      // Gửi lệnh auto mode với timing hiện tại
-      DateTime now = rtc.now();
-      bool isPeak = isInPeakHours(now);
-      if (isPeak) {
-        ArduinoSerial.print("AUTO:PEAK:");
-        ArduinoSerial.print(peakRed);
-        ArduinoSerial.print(":");
-        ArduinoSerial.print(peakYellow);
-        ArduinoSerial.print(":");
-        ArduinoSerial.println(peakGreen);
-      } else {
-        ArduinoSerial.print("AUTO:NORMAL:");
-        ArduinoSerial.print(normalRed);
-        ArduinoSerial.print(":");
-        ArduinoSerial.print(normalYellow);
-        ArduinoSerial.print(":");
-        ArduinoSerial.println(normalGreen);
-      }
-      
-      // Reset biến lastSent để force gửi lại lệnh
-      lastSentMode = "";
-      lastSentRed = 0;
-      lastSentYellow = 0;
-      lastSentGreen = 0;
+      operationMode = "auto";n
+      Serial.println("[BTN] Mode -> AUTO");
+      sendAutoTiming();
     } else {
       operationMode = "manual";
-      Serial.println("[BTN] Mode changed to MANUAL");
-      
-      // Set mặc định: J1=RED, J2=GREEN
+      Serial.println("[BTN] Mode -> MANUAL");
       junction1Color = "red";
       junction2Color = "green";
-      
       ArduinoSerial.println("MANUAL:J1:RED");
       ArduinoSerial.println("MANUAL:J2:GREEN");
-    }
-    
-    updateDisplay();
-  }
-  
-  // Nút 5: Toggle đèn giao thông (chỉ khi Manual mode)
-  if (digitalRead(BTN_TOGGLE) == LOW && (currentTime - lastBtnPress[1] > debounceDelay)) {
-    lastBtnPress[1] = currentTime;
-    
-    if (operationMode == "manual") {
-      // Đảo trạng thái: RED ↔ GREEN
-      if (junction1Color == "red") {
-        junction1Color = "green";
-        junction2Color = "red";
-      } else if (junction1Color == "green") {
-        junction1Color = "red";
-        junction2Color = "green";
-      } else {
-        // Nếu đang ở vàng, chuyển về đỏ-xanh
-        junction1Color = "red";
-        junction2Color = "green";
-      }
-      
-      Serial.printf("[BTN] Toggled - J1:%s, J2:%s\n", junction1Color.c_str(), junction2Color.c_str());
-      
-      // Gửi lệnh
-      String j1Upper = junction1Color;
-      j1Upper.toUpperCase();
-      String j2Upper = junction2Color;
-      j2Upper.toUpperCase();
-      
-      ArduinoSerial.print("MANUAL:J1:");
-      ArduinoSerial.println(j1Upper);
-      ArduinoSerial.print("MANUAL:J2:");
-      ArduinoSerial.println(j2Upper);
-      
       lastSentJ1 = junction1Color;
       lastSentJ2 = junction2Color;
-      updateDisplay();
-    } else {
-      Serial.println("[BTN] Toggle ignored - Not in MANUAL mode");
     }
-  }
-  
-  // Nút 18: Bật đèn đường (thủ công)
-  if (digitalRead(BTN_STREET_ON) == LOW && (currentTime - lastBtnPress[2] > debounceDelay)) {
-    lastBtnPress[2] = currentTime;
-    
-    // Set brightness nếu chưa có
-    if (brightnessValue == 0) {
-      brightnessValue = 70; // Độ sáng mặc định
-    }
-    
-    manualStreetOn = true;  // Đánh dấu bật thủ công
-    ArduinoSerial.print("STREET:ON:");
-    ArduinoSerial.println(brightnessValue);
-    
-    Serial.printf("[BTN] Street light ON (manual) at %d%%\n", brightnessValue);
-    
-    lastStreetState = true;
-    lastStreetBright = brightnessValue;
+    inMenu = false; // thoát menu khi đổi mode
     updateDisplay();
   }
-  
-  // Nút 19: Tắt đèn đường (thủ công)
-  if (digitalRead(BTN_STREET_OFF) == LOW && (currentTime - lastBtnPress[3] > debounceDelay)) {
+
+  // ── Nút BTN_MENU (GPIO 5): Vào menu / chuyển menu tiếp theo ──
+  if (digitalRead(BTN_MENU) == LOW && (currentTime - lastBtnPress[1] > debounceDelay)) {
+    lastBtnPress[1] = currentTime;
+    menuLastAction = currentTime;
+    int maxMenu = (operationMode == "manual") ? MENU_MANUAL_COUNT : MENU_AUTO_COUNT;
+    if (!inMenu) {
+      inMenu = true;
+      currentMenu = 0;
+    } else {
+      currentMenu = (currentMenu + 1) % maxMenu;
+    }
+    Serial.printf("[BTN] Menu -> %d\n", currentMenu);
+    updateDisplay();
+  }
+
+  // ── Nút BTN_UP (GPIO 18): Tăng giá trị / hành động UP ──
+  if (digitalRead(BTN_UP) == LOW && (currentTime - lastBtnPress[2] > debounceDelay)) {
+    lastBtnPress[2] = currentTime;
+    menuLastAction = currentTime;
+
+    if (!inMenu) {
+      // Ngoài menu: bật đèn đường thủ công
+      if (brightnessValue == 0) brightnessValue = 70;
+      manualStreetOn = true;
+      ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue);
+      lastStreetState = true; lastStreetBright = brightnessValue;
+      Serial.printf("[BTN] Street ON at %d%%\n", brightnessValue);
+    } else {
+      // Trong menu: tăng giá trị
+      if (operationMode == "manual") {
+        switch (currentMenu) {
+          case 0: // Toggle J1/J2
+            if (junction1Color == "red") { junction1Color = "green"; junction2Color = "red"; }
+            else { junction1Color = "red"; junction2Color = "green"; }
+            { String j1u = junction1Color; j1u.toUpperCase();
+              String j2u = junction2Color; j2u.toUpperCase();
+              ArduinoSerial.print("MANUAL:J1:"); ArduinoSerial.println(j1u);
+              ArduinoSerial.print("MANUAL:J2:"); ArduinoSerial.println(j2u);
+              lastSentJ1 = junction1Color; lastSentJ2 = junction2Color; }
+            break;
+          case 1: // Street ON/OFF
+            manualStreetOn = true;
+            if (brightnessValue == 0) brightnessValue = 70;
+            ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue);
+            lastStreetState = true; lastStreetBright = brightnessValue;
+            break;
+          case 2: // Brightness +5
+            brightnessValue = min(100, brightnessValue + 5);
+            if (manualStreetOn) { ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue); }
+            break;
+        }
+      } else { // auto
+        switch (currentMenu) {
+          case 0: // Street ON
+            manualStreetOn = true;
+            if (brightnessValue == 0) brightnessValue = 70;
+            ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue);
+            lastStreetState = true; lastStreetBright = brightnessValue;
+            break;
+          case 1: // Brightness +5
+            brightnessValue = min(100, brightnessValue + 5);
+            if (manualStreetOn) { ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue); }
+            break;
+          case 2: // ON time +30min
+            streetOnMinutes = (streetOnMinutes + 30) % (24 * 60);
+            applyStreetSchedule();
+            break;
+          case 3: // OFF time +30min
+            streetOffMinutes = (streetOffMinutes + 30) % (24 * 60);
+            applyStreetSchedule();
+            break;
+          case 4: // Green +1s
+            btnGreen = min(99, btnGreen + 1);
+            sendAutoTiming();
+            break;
+          case 5: // Red +1s
+            btnRed = min(99, btnRed + 1);
+            sendAutoTiming();
+            break;
+          case 6: // Yellow +1s
+            btnYellow = min(9, btnYellow + 1);
+            sendAutoTiming();
+            break;
+        }
+      }
+    }
+    updateDisplay();
+  }
+
+  // ── Nút BTN_DOWN (GPIO 19): Giảm giá trị / hành động DOWN ──
+  if (digitalRead(BTN_DOWN) == LOW && (currentTime - lastBtnPress[3] > debounceDelay)) {
     lastBtnPress[3] = currentTime;
-    
-    manualStreetOn = false;  // Tắt override thủ công
-    ArduinoSerial.println("STREET:OFF");
-    
-    Serial.println("[BTN] Street light OFF (manual)");
-    
-    lastStreetState = false;
+    menuLastAction = currentTime;
+
+    if (!inMenu) {
+      // Ngoài menu: tắt đèn đường thủ công
+      manualStreetOn = false;
+      ArduinoSerial.println("STREET:OFF");
+      lastStreetState = false;
+      Serial.println("[BTN] Street OFF");
+    } else {
+      // Trong menu: giảm giá trị
+      if (operationMode == "manual") {
+        switch (currentMenu) {
+          case 0: // Toggle J1/J2 (UP và DOWN đều toggle)
+            if (junction1Color == "red") { junction1Color = "green"; junction2Color = "red"; }
+            else { junction1Color = "red"; junction2Color = "green"; }
+            { String j1u = junction1Color; j1u.toUpperCase();
+              String j2u = junction2Color; j2u.toUpperCase();
+              ArduinoSerial.print("MANUAL:J1:"); ArduinoSerial.println(j1u);
+              ArduinoSerial.print("MANUAL:J2:"); ArduinoSerial.println(j2u);
+              lastSentJ1 = junction1Color; lastSentJ2 = junction2Color; }
+            break;
+          case 1: // Street OFF
+            manualStreetOn = false;
+            ArduinoSerial.println("STREET:OFF");
+            lastStreetState = false;
+            break;
+          case 2: // Brightness -5
+            brightnessValue = max(5, brightnessValue - 5);
+            if (manualStreetOn) { ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue); }
+            break;
+        }
+      } else { // auto
+        switch (currentMenu) {
+          case 0: // Street OFF
+            manualStreetOn = false;
+            ArduinoSerial.println("STREET:OFF");
+            lastStreetState = false;
+            break;
+          case 1: // Brightness -5
+            brightnessValue = max(5, brightnessValue - 5);
+            if (manualStreetOn) { ArduinoSerial.print("STREET:ON:"); ArduinoSerial.println(brightnessValue); }
+            break;
+          case 2: // ON time -30min
+            streetOnMinutes = (streetOnMinutes - 30 + 24 * 60) % (24 * 60);
+            applyStreetSchedule();
+            break;
+          case 3: // OFF time -30min
+            streetOffMinutes = (streetOffMinutes - 30 + 24 * 60) % (24 * 60);
+            applyStreetSchedule();
+            break;
+          case 4: // Green -1s
+            btnGreen = max(1, btnGreen - 1);
+            sendAutoTiming();
+            break;
+          case 5: // Red -1s
+            btnRed = max(1, btnRed - 1);
+            sendAutoTiming();
+            break;
+          case 6: // Yellow -1s
+            btnYellow = max(1, btnYellow - 1);
+            sendAutoTiming();
+            break;
+        }
+      }
+    }
     updateDisplay();
   }
 }
